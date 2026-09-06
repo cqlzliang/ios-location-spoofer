@@ -1011,6 +1011,9 @@
   function resolveConfigUrl(args) {
     args = args || {};
     var direct = String(args.configUrl || args.cfg || args.url || "").trim();
+    if (direct.toLowerCase() === "disabled") {
+      return "";
+    }
     if (direct) {
       return direct;
     }

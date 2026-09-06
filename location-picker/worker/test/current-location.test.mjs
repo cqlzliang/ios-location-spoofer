@@ -16,10 +16,11 @@ for (const [label, content] of pages) {
   test(`${label} exposes a guarded current-location control`, () => {
     assert.match(content, /<button id="locatebtn"[^>]*>当前位置<\/button>/);
     assert.match(content, /function locateCurrent\(\)/);
-    assert.match(
-      content,
-      /if\s*\(enabledState\)\s*\{\s*toast\("请先恢复真实定位并刷新定位服务"\);\s*return;\s*\}/s,
-    );
+    if (label === "source page") {
+      assert.match(content, /if\s*\(enabledState\)\s*\{\s*showCurrentLocation\(\);\s*return;\s*\}/s);
+    } else {
+      assert.match(content, /if\s*\(enabledState\)\s*\{\s*toast\("请先恢复真实定位并刷新定位服务"\);\s*return;\s*\}/s);
+    }
     assert.match(content, /navigator\.geolocation\.getCurrentPosition\(/);
   });
 
@@ -33,8 +34,17 @@ for (const [label, content] of pages) {
     assert.match(content, /WGS\s*=\s*\{\s*lat:\s*lat,\s*lng:\s*lng\s*\}/);
     assert.match(content, /saved\s*=\s*false/);
     assert.match(content, /marker\.setLatLng\(p\)/);
-    assert.match(content, /map\.setView\(p,\s*16\)/);
-    assert.doesNotMatch(content, /commit\(\);/);
+    if (label === "source page") {
+      assert.match(content, /map\.setView\(p,\s*18\)/);
+    } else {
+      assert.match(content, /map\.setView\(p,\s*16\)/);
+    }
+    const movePinStart = content.indexOf("function movePin(");
+    if (movePinStart >= 0) {
+      const movePinEnd = content.indexOf("function commit(", movePinStart);
+      assert.ok(movePinEnd > movePinStart, "commit function should follow movePin");
+      assert.doesNotMatch(content.slice(movePinStart, movePinEnd), /commit\(/);
+    }
   });
 
   test(`${label} maps Geolocation failures to user-facing messages`, () => {
@@ -43,4 +53,25 @@ for (const [label, content] of pages) {
     assert.match(content, /获取当前位置超时，请到开阔处重试/);
     assert.match(content, /当前浏览器不支持定位/);
   });
+
+  test(`${label} can reload the active spoofed location`, () => {
+    if (label !== "source page") return;
+    assert.match(content, /function showCurrentLocation\(\)/);
+    assert.match(content, /fetch\("\/loc\.json\?token="\+encodeURIComponent\(token\),\{cache:"no-store"\}\)/);
+    assert.match(content, /toast\("已显示当前生效定位"\)/);
+  });
+
 }
+
+test("Worker source makes the search result the active draft point", () => {
+  const page = pages[0][1];
+  assert.doesNotMatch(page, /searchPreviewMarker|searchPreviewWgs|showSearchPreview/);
+  assert.match(page, /WGS=\{lat:la,lng:wrapLng\(lo\)\}/);
+  assert.match(page, /saved=false/);
+  assert.match(page, /marker\.setLatLng\(p\)/);
+});
+
+test("Worker source opens the map at a close default zoom", () => {
+  const page = pages[0][1];
+  assert.match(page, /map\.setView\(dispPos\(\),18\)/);
+});

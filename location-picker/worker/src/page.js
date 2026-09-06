@@ -18,6 +18,7 @@ export const PAGE = `<!doctype html>
   .rrow:last-child{border-bottom:0}
   .rrow:active{background:#f0f6ff}
   .rrow .fname{flex:1;min-width:0}
+  .rrow .current-tag{padding:3px 6px;font-size:12px;border-radius:5px;background:#34c759;color:#fff;flex-shrink:0}
   .rrow .fdel{padding:6px 10px;font-size:13px;border:0;border-radius:6px;background:#ff3b30;color:#fff;flex-shrink:0}
   #map{height:52vh}
   #info{padding:8px 10px;font-size:13px;line-height:1.4}
@@ -31,6 +32,16 @@ export const PAGE = `<!doctype html>
     background:rgba(0,0,0,.85);color:#fff;padding:10px 16px;border-radius:8px;
     font-size:14px;opacity:0;transition:opacity .3s;pointer-events:none;z-index:9999}
   .toast.show{opacity:1}
+  .favmodal{position:fixed;inset:0;background:rgba(0,0,0,.38);display:none;align-items:center;justify-content:center;z-index:10000}
+  .favmodal.show{display:flex}
+  .favcard{width:min(92vw,420px);box-sizing:border-box;background:#fff;border-radius:14px;padding:18px;box-shadow:0 10px 35px rgba(0,0,0,.25)}
+  .favcard h3{margin:0 0 14px;font-size:18px}
+  .favcard label{display:block;font-size:13px;color:#444;margin:10px 0}
+  .favcard input{display:block;width:100%;box-sizing:border-box;padding:10px;margin-top:5px;font-size:16px;border:1px solid #ccc;border-radius:8px}
+  .favactions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+  .favactions button{padding:9px 14px;border:0;border-radius:8px;font-size:15px}
+  #favcancel{background:#e5e5ea;color:#222}
+  #favsave{background:#5856d6;color:#fff}
 </style>
 </head>
 <body>
@@ -43,6 +54,8 @@ export const PAGE = `<!doctype html>
 <div id="map"></div>
 <div id="info">加载中…</div>
 <div class="opts">
+  <label>名称<input id="favname" type="text" maxlength="200" placeholder="收藏名称"></label>
+  <label>地址<input id="favaddress" type="text" maxlength="500" placeholder="地址（可选）"></label>
   <label>海拔(米)<input id="alt" type="number" inputmode="numeric"></label>
   <label>水平精度<input id="hacc" type="number" inputmode="numeric"></label>
   <label>垂直精度<input id="vacc" type="number" inputmode="numeric"></label>
@@ -53,6 +66,17 @@ export const PAGE = `<!doctype html>
 </div>
 <div class="results" id="favs"></div>
 <div class="toast" id="toast"></div>
+<div class="favmodal" id="favmodal">
+  <div class="favcard">
+    <h3 id="favmodaltitle">收藏定位点</h3>
+    <label>名称<input id="favmodalname" type="text" maxlength="200"></label>
+    <label>地址<input id="favmodaladdress" type="text" maxlength="500"></label>
+    <div class="favactions">
+      <button id="favcancel" type="button">取消</button>
+      <button id="favsave" type="button">保存收藏</button>
+    </div>
+  </div>
+</div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH" crossorigin="anonymous"></script>
 <script>
 var token = new URLSearchParams(location.search).get("token") || "";
@@ -114,46 +138,106 @@ function geolocationErrorMessage(err){
   return "获取当前位置失败";
 }
 
-var FAV_KEY="lp_favs_v1";
-var FAV_MAX=12;
-function loadFavs(){
-  try{
-    var raw=localStorage.getItem(FAV_KEY);
-    var a=raw?JSON.parse(raw):[];
-    return Array.isArray(a)?a:[];
-  }catch(e){return [];}
+var favorites=[];
+var editingFavoriteId="";
+function favoriteUrl(path){return path+"?token="+encodeURIComponent(token);}
+function loadFavorites(){
+  return fetch(favoriteUrl("/favorites")).then(function(r){
+    if(!r.ok)throw new Error("favorites "+r.status);
+    return r.json();
+  }).then(function(d){
+    favorites=Array.isArray(d.favorites)?d.favorites:[];
+    renderFavorites();
+  }).catch(function(){toast("收藏列表加载失败");});
 }
-function saveFavs(list){
-  try{localStorage.setItem(FAV_KEY,JSON.stringify(list.slice(0,FAV_MAX)));}catch(e){}
+function favoriteCoords(it){
+  return {lat:Number(it.latitude!==undefined?it.latitude:it.lat),lng:wrapLng(Number(it.longitude!==undefined?it.longitude:it.lng))};
+}
+function setFavoriteForm(it){
+  var p=favoriteCoords(it);
+  if(!Number.isFinite(p.lat)||!Number.isFinite(p.lng)){toast("收藏坐标无效");return false;}
+  WGS=p;
+  saved=false;
+  $("favname").value=it.name||"";
+  $("favaddress").value=it.address||"";
+  if(it.altitude!=null&&it.altitude!=="")$("alt").value=it.altitude;
+  if(it.horizontalAccuracy!=null&&it.horizontalAccuracy!=="")$("hacc").value=it.horizontalAccuracy;
+  if(it.verticalAccuracy!=null&&it.verticalAccuracy!=="")$("vacc").value=it.verticalAccuracy;
+  var pos=dispPos();
+  marker.setLatLng(pos);
+  map.setView(pos,18);
+  info();
+  return true;
+}
+function previewFavorite(it){
+  if(!setFavoriteForm(it))return;
+  $("favname").value=it.name||"";
+  $("favaddress").value=it.address||"";
+  refreshFavoriteMark();
+  toast("已显示收藏点，点击“应用”后生效");
 }
 function applyFavorite(it){
-  var lat=Number(it.lat), lng=wrapLng(it.lng);
-  if(!Number.isFinite(lat)||!Number.isFinite(lng)){toast("收藏坐标无效");return;}
-  WGS={lat:lat,lng:lng};
-  saved=false;
-  if(it.alt!=null&&it.alt!=="")$("alt").value=it.alt;
-  if(it.hacc!=null&&it.hacc!=="")$("hacc").value=it.hacc;
-  if(it.vacc!=null&&it.vacc!=="")$("vacc").value=it.vacc;
-  var p=dispPos();
-  marker.setLatLng(p);
-  map.setView(p,15);
-  info();
-  toast("已加载收藏，确认后保存");
+  if(!setFavoriteForm(it))return;
+  refreshFavoriteMark();
+  commit(function(){
+    refreshFavoriteMark();
+    toast("已应用收藏点 ✓");
+  });
+}
+function currentFavoriteId(){
+  if(!saved||!enabledState||!Number.isFinite(WGS.lat)||!Number.isFinite(WGS.lng))return "";
+  for(var i=0;i<favorites.length;i++){
+    var p=favoriteCoords(favorites[i]);
+    if(Number.isFinite(p.lat)&&Number.isFinite(p.lng)&&
+       Math.abs(p.lat-WGS.lat)<1e-5&&Math.abs(p.lng-WGS.lng)<1e-5){
+      return String(favorites[i].id||"");
+    }
+  }
+  return "";
+}
+function refreshFavoriteMark(){
+  if($("favs").classList.contains("show"))renderFavs();
 }
 function renderFavs(){
   var box=$("favs");
-  var list=loadFavs();
+  var list=favorites;
+  var activeId=currentFavoriteId();
   box.innerHTML="";
   if(!list.length){box.classList.remove("show");return;}
-  list.forEach(function(it,idx){
+  list.forEach(function(it){
     var row=document.createElement("div");
     row.className="rrow";
     var name=document.createElement("span");
     name.className="fname";
-    name.textContent=it.name||(Number(it.lat).toFixed(4)+","+Number(it.lng).toFixed(4));
+    var p=favoriteCoords(it);
+    name.textContent=it.name||(p.lat.toFixed(4)+","+p.lng.toFixed(4));
     name.addEventListener("click",function(){
       $("results").classList.remove("show");
+      previewFavorite(it);
+    });
+    if(activeId&&String(it.id||"")===activeId){
+      var current=document.createElement("span");
+      current.className="current-tag";
+      current.textContent="当前";
+      row.appendChild(current);
+    }
+    var use=document.createElement("button");
+    use.className="fdel";
+    use.type="button";
+    use.style.background="#34c759";
+    use.textContent="应用";
+    use.addEventListener("click",function(e){
+      e.stopPropagation();
       applyFavorite(it);
+    });
+    var edit=document.createElement("button");
+    edit.className="fdel";
+    edit.type="button";
+    edit.style.background="#ff9500";
+    edit.textContent="编辑";
+    edit.addEventListener("click",function(e){
+      e.stopPropagation();
+      editFavorite(it);
     });
     var del=document.createElement("button");
     del.className="fdel";
@@ -161,13 +245,15 @@ function renderFavs(){
     del.textContent="删";
     del.addEventListener("click",function(e){
       e.stopPropagation();
-      var next=loadFavs();
-      next.splice(idx,1);
-      saveFavs(next);
-      if(next.length)renderFavs();else{box.innerHTML="";box.classList.remove("show");}
-      toast("已删除收藏");
+      if(!confirm("确定删除收藏“"+(it.name||"此点")+"”吗？"))return;
+      fetch(favoriteUrl("/favorites/"+encodeURIComponent(it.id)),{method:"DELETE"})
+        .then(function(r){if(!r.ok)throw new Error("delete "+r.status);return loadFavorites();})
+        .then(function(){toast("已删除收藏");})
+        .catch(function(){toast("删除收藏失败");});
     });
     row.appendChild(name);
+    row.appendChild(use);
+    row.appendChild(edit);
     row.appendChild(del);
     box.appendChild(row);
   });
@@ -176,32 +262,66 @@ function renderFavs(){
 function addFavorite(){
   if(!Number.isFinite(WGS.lat)||!Number.isFinite(WGS.lng)){toast("当前坐标无效");return;}
   var def=$("q").value.trim()||(WGS.lat.toFixed(4)+","+WGS.lng.toFixed(4));
-  var name=window.prompt("收藏名称",def);
-  if(name===null)return;
-  name=String(name).trim()||def;
-  var list=loadFavs().filter(function(it){
-    return Math.abs(Number(it.lat)-WGS.lat)>1e-5||Math.abs(Number(it.lng)-WGS.lng)>1e-5;
-  });
-  list.unshift({
+  var name=$("favname").value.trim()||def;
+  var address=$("favaddress").value.trim();
+  editingFavoriteId="";
+  $("favmodaltitle").textContent="收藏定位点";
+  $("favmodalname").value=name;
+  $("favmodaladdress").value=address;
+  $("favmodal").classList.add("show");
+}
+function editFavorite(it){
+  editingFavoriteId=String(it.id||"");
+  if(!editingFavoriteId){toast("收藏 ID 无效");return;}
+  $("favmodaltitle").textContent="编辑收藏定位点";
+  $("favmodalname").value=it.name||"";
+  $("favmodaladdress").value=it.address||"";
+  $("favmodal").classList.add("show");
+}
+function closeFavoriteModal(){
+  $("favmodal").classList.remove("show");
+  editingFavoriteId="";
+}
+function saveFavorite(){
+  var name=$("favmodalname").value.trim();
+  var address=$("favmodaladdress").value.trim();
+  if(!name){toast("名称不能为空");return;}
+  if(editingFavoriteId){
+    fetch(favoriteUrl("/favorites/"+encodeURIComponent(editingFavoriteId)),{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:name,address:address})})
+      .then(function(r){if(!r.ok)throw new Error("update "+r.status);return loadFavorites();})
+      .then(function(){closeFavoriteModal();toast("已更新收藏");})
+      .catch(function(){toast("更新收藏失败");});
+    return;
+  }
+  if(!Number.isFinite(WGS.lat)||!Number.isFinite(WGS.lng)){closeFavoriteModal();toast("当前坐标无效");return;}
+  var def=$("q").value.trim()||(WGS.lat.toFixed(4)+","+WGS.lng.toFixed(4));
+  name=name||def;
+  $("favname").value=name;
+  $("favaddress").value=address;
+  var payload={
     name:name,
-    lat:WGS.lat,
-    lng:WGS.lng,
-    alt:numOrNull("alt"),
-    hacc:numOrNull("hacc"),
-    vacc:numOrNull("vacc"),
-    ts:Date.now()
-  });
-  saveFavs(list);
-  renderFavs();
-  toast("已收藏");
+    address:address,
+    latitude:WGS.lat,
+    longitude:WGS.lng,
+    altitude:numOrNull("alt"),
+    horizontalAccuracy:numOrNull("hacc"),
+    verticalAccuracy:numOrNull("vacc")
+  };
+  fetch(favoriteUrl("/favorites"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
+    .then(function(r){if(!r.ok)throw new Error("create "+r.status);return loadFavorites();})
+    .then(function(){closeFavoriteModal();toast("已收藏");})
+    .catch(function(){toast("收藏失败");});
 }
 function toggleFavs(){
   var box=$("favs");
   if(box.classList.contains("show")){box.classList.remove("show");return;}
   $("results").classList.remove("show");
-  if(!loadFavs().length){toast("暂无收藏");return;}
-  renderFavs();
+  loadFavorites().then(function(){
+    if(!favorites.length){toast("暂无收藏");return;}
+    renderFavorites();
+  });
 }
+function renderFavorites(){renderFavs();}
 
 function info(){
   if(!enabledState){
@@ -226,7 +346,7 @@ function toggleEnabled(){
   var want = !enabledState;
   fetch("/enable?token="+encodeURIComponent(token),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:want})})
     .then(function(r){
-      if(r.ok){ enabledState=want; updateEnabledUI();
+      if(r.ok){ enabledState=want; updateEnabledUI(); refreshFavoriteMark();
         toast(want ? "已开启伪造，记得关开定位生效" : "已恢复真实定位，记得关开定位生效"); }
       else toast("切换失败 "+r.status);
     })
@@ -254,17 +374,29 @@ function movePin(dispLat,dispLng){
   fetchElevation(WGS.lat,WGS.lng).then(function(el){ if(el!==null)$("alt").value=Math.round(el); info(); });
 }
 
-function commit(){
+function commit(done){
   var payload={lat:WGS.lat, lng:WGS.lng,
     altitude:numOrNull("alt"), horizontalAccuracy:numOrNull("hacc"), verticalAccuracy:numOrNull("vacc")};
   fetch("/set?token="+encodeURIComponent(token),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
-    .then(function(r){ if(r.ok){ saved=true; enabledState=true; updateEnabledUI(); toast("已保存 ✓ Loon/小火箭约60秒内生效"); } else { toast("保存失败 "+r.status); } })
-    .catch(function(){ toast("网络错误"); });
+    .then(function(r){
+      if(!r.ok){ toast("保存失败 "+r.status); return; }
+      saved=true;
+      enabledState=true;
+      try{
+        updateEnabledUI();
+        refreshFavoriteMark();
+        if(done)done(); else toast("已保存 ✓ Loon/小火箭约60秒内生效");
+      }catch(e){
+        console.error("定位已保存，但页面状态更新失败",e);
+        toast("已保存，但页面状态更新失败");
+      }
+    })
+    .catch(function(e){ console.error("保存定位请求失败",e); toast("保存请求失败，请检查网络"); });
 }
 
 function locateCurrent(){
   if(enabledState){
-    toast("请先恢复真实定位并刷新定位服务");
+    showCurrentLocation();
     return;
   }
   if(!navigator.geolocation){
@@ -287,7 +419,7 @@ function locateCurrent(){
       saved=false;
       var p=dispPos();
       marker.setLatLng(p);
-      map.setView(p,16);
+      map.setView(p,18);
       info();
       fetchElevation(WGS.lat,WGS.lng).then(function(el){
         if(el!==null)$("alt").value=Math.round(el);
@@ -304,6 +436,32 @@ function locateCurrent(){
   );
 }
 
+function showCurrentLocation(){
+  var b=$("locatebtn");
+  b.disabled=true;
+  b.textContent="读取中…";
+  fetch("/loc.json?token="+encodeURIComponent(token),{cache:"no-store"})
+    .then(function(r){if(!r.ok)throw new Error("loc "+r.status);return r.json();})
+    .then(function(d){
+      var lat=Number(d.latitude),lng=wrapLng(Number(d.longitude));
+      if(!Number.isFinite(lat)||!Number.isFinite(lng))throw new Error("invalid location");
+      WGS={lat:lat,lng:lng};
+      saved=true;
+      enabledState=(d.enabled!==false);
+      if(d.altitude!==undefined)$("alt").value=d.altitude;
+      if(d.horizontalAccuracy!==undefined)$("hacc").value=d.horizontalAccuracy;
+      if(d.verticalAccuracy!==undefined)$("vacc").value=d.verticalAccuracy;
+      var p=dispPos();
+      marker.setLatLng(p);
+      map.setView(p,18);
+      updateEnabledUI();
+      refreshFavoriteMark();
+      toast("已显示当前生效定位");
+    })
+    .catch(function(e){console.error("读取当前生效定位失败",e);toast("读取当前生效定位失败");})
+    .finally(function(){b.disabled=false;b.textContent="当前位置";});
+}
+
 function search(){
   var q=$("q").value.trim(); if(!q) return;
   fetch("https://nominatim.openstreetmap.org/search?format=json&addressdetails=0&limit=8&q="+encodeURIComponent(q))
@@ -318,9 +476,16 @@ function search(){
         row.addEventListener("click",function(){
           box.classList.remove("show"); box.innerHTML="";
           var la=+it.lat, lo=+it.lon;
-          var p = datum==="gcj"?GCJ.wgs2gcj(la,lo):[la,lo];
-          map.setView(p,15);
-          toast("已定位视野，在地图上点一下放置图钉");
+          WGS={lat:la,lng:wrapLng(lo)};
+          saved=false;
+          $("favname").value=$("q").value.trim()||it.display_name||"";
+          $("favaddress").value=it.display_name||"";
+          var p=dispPos();
+          marker.setLatLng(p);
+          map.setView(p,18);
+          info();
+          fetchElevation(WGS.lat,WGS.lng).then(function(el){if(el!==null)$("alt").value=Math.round(el);info();});
+          toast("已选择搜索地点，请确认后保存或收藏");
         });
         box.appendChild(row);
       });
@@ -350,26 +515,33 @@ function load(){
 
     map=L.map("map");
     amapVec.addTo(map); datum="gcj";
-    map.setView(dispPos(),13);
+    map.setView(dispPos(),18);
     L.control.layers({"高德地图":amapVec,"高德卫星":amapSat,"国外 OSM":osm},null,{collapsed:false}).addTo(map);
 
     marker=L.marker(dispPos(),{draggable:true}).addTo(map);
     updateEnabledUI();
     setLocateBusy(false);
 
-    map.on("baselayerchange",function(e){datum=e.layer.datum||"wgs"; var p=dispPos(); marker.setLatLng(p); map.setView(p,map.getZoom()); info();});
+    map.on("baselayerchange",function(e){
+      datum=e.layer.datum||"wgs";
+      var p=dispPos(); marker.setLatLng(p); map.setView(p,18);
+      info();
+    });
     map.on("click",function(e){movePin(e.latlng.lat,e.latlng.lng);});
     marker.on("dragend",function(){var p=marker.getLatLng(); movePin(p.lat,p.lng);});
+    loadFavorites();
   }).catch(function(){$("info").textContent="加载失败，检查 token 是否正确";});
 }
 
 $("btn").addEventListener("click",search);
 $("q").addEventListener("keydown",function(e){if(e.key==="Enter")search();});
 $("locatebtn").addEventListener("click",locateCurrent);
-$("savebtn").addEventListener("click",commit);
+$("savebtn").addEventListener("click",function(){commit();});
 $("restorebtn").addEventListener("click",toggleEnabled);
 $("favadd").addEventListener("click",addFavorite);
 $("favlistbtn").addEventListener("click",toggleFavs);
+$("favcancel").addEventListener("click",closeFavoriteModal);
+$("favsave").addEventListener("click",saveFavorite);
 load();
 </script>
 </body>

@@ -4,12 +4,17 @@
  * API（与 location-picker/server.js 兼容）：
  *   GET  /loc.json?token=   → 读取坐标 JSON（Loon / Shadowrocket configUrl）
  *   POST /set?token=        → 保存坐标
+ *   GET  /favorites?token=  → 读取收藏定位点
+ *   POST /favorites?token= → 新增收藏定位点
+ *   PATCH /favorites/:id?token= → 修改收藏名称和地址
+ *   DELETE /favorites/:id?token= → 删除收藏定位点
  *   GET  /?token=           → 地图选点网页（必须带正确 token）
  */
 
 import { PAGE } from "./page.js";
 
 const KV_KEY = "loc";
+const FAVORITES_KEY = "favorites";
 
 const DEFAULT = {
   enabled: true,          // false = 脚本放行原始响应（恢复真实定位）
@@ -22,7 +27,7 @@ const DEFAULT = {
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, PATCH, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
   // 选点页 URL 带 ?token=，务必阻止它经 Referer 泄漏给 unpkg / 高德 / OSM / open-meteo / nominatim
   "Referrer-Policy": "no-referrer",
@@ -113,6 +118,21 @@ async function writeLoc(env, obj) {
   await env.LOC_KV.put(KV_KEY, JSON.stringify(obj));
 }
 
+async function readFavorites(env) {
+  try {
+    const raw = await env.LOC_KV.get(FAVORITES_KEY);
+    if (!raw) return [];
+    const value = JSON.parse(raw);
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeFavorites(env, favorites) {
+  await env.LOC_KV.put(FAVORITES_KEY, JSON.stringify(favorites));
+}
+
 function setInt(target, key, value) {
   if (value !== undefined && value !== null && value !== "" && Number.isFinite(Number(value))) {
     target[key] = Math.round(Number(value));
@@ -121,6 +141,41 @@ function setInt(target, key, value) {
 
 function wrapLng(lng) {
   return ((((Number(lng) + 180) % 360) + 360) % 360) - 180;
+}
+
+function parseFavoriteInput(input) {
+  const source = input || {};
+  const name = String(source.name || "").trim();
+  const address = String(source.address || "").trim();
+  const latitude = Number(source.latitude !== undefined ? source.latitude : source.lat);
+  const longitudeRaw = Number(source.longitude !== undefined ? source.longitude : source.lng);
+  if (!name || name.length > 200) return { error: "bad name" };
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitudeRaw) || latitude < -90 || latitude > 90) {
+    return { error: "bad coords" };
+  }
+
+  const result = {
+    name,
+    address: address.slice(0, 500),
+    latitude,
+    longitude: wrapLng(longitudeRaw),
+  };
+  for (const key of ["altitude", "horizontalAccuracy", "verticalAccuracy"]) {
+    const value = source[key];
+    if (value !== undefined && value !== null && value !== "") {
+      if (!Number.isFinite(Number(value))) return { error: "bad " + key };
+      result[key] = Math.round(Number(value));
+    }
+  }
+  return { value: result };
+}
+
+function parseFavoriteMeta(input) {
+  const source = input || {};
+  const name = String(source.name || "").trim();
+  const address = String(source.address || "").trim();
+  if (!name || name.length > 200) return { error: "bad name" };
+  return { value: { name, address: address.slice(0, 500) } };
 }
 
 export default {
@@ -190,6 +245,72 @@ export default {
       } catch (error) {
         return jsonResponse({ error: "bad json" }, 400);
       }
+    }
+
+    // ---- 全局收藏定位点（单用户使用，不按 token 隔离） ----
+    if (url.pathname === "/favorites" && request.method === "GET") {
+      if (!auth.ok) return unauthorized();
+      return jsonResponse({ favorites: await readFavorites(env) });
+    }
+
+    if (url.pathname === "/favorites" && request.method === "POST") {
+      if (!auth.ok) return unauthorized();
+      try {
+        const bodyText = await request.text();
+        if (bodyText.length > 10000) return jsonResponse({ error: "payload too large" }, 413);
+        const parsed = parseFavoriteInput(JSON.parse(bodyText));
+        if (parsed.error) return jsonResponse({ error: parsed.error }, 400);
+        const now = Date.now();
+        const favorite = {
+          id: crypto.randomUUID(),
+          ...parsed.value,
+          createdAt: now,
+          updatedAt: now,
+        };
+        const favorites = await readFavorites(env);
+        favorites.unshift(favorite);
+        await writeFavorites(env, favorites);
+        return jsonResponse(favorite, 201);
+      } catch {
+        return jsonResponse({ error: "bad json" }, 400);
+      }
+    }
+
+    const favoritePatchMatch = url.pathname.match(/^\/favorites\/([^/]+)$/);
+    if (favoritePatchMatch && request.method === "PATCH") {
+      if (!auth.ok) return unauthorized();
+      try {
+        const bodyText = await request.text();
+        if (bodyText.length > 10000) return jsonResponse({ error: "payload too large" }, 413);
+        const parsed = parseFavoriteMeta(JSON.parse(bodyText));
+        if (parsed.error) return jsonResponse({ error: parsed.error }, 400);
+        const id = decodeURIComponent(favoritePatchMatch[1]);
+        const favorites = await readFavorites(env);
+        const index = favorites.findIndex((item) => String(item.id) === id);
+        if (index < 0) return jsonResponse({ error: "favorite not found" }, 404);
+        favorites[index] = {
+          ...favorites[index],
+          ...parsed.value,
+          updatedAt: Date.now(),
+        };
+        await writeFavorites(env, favorites);
+        return jsonResponse(favorites[index]);
+      } catch {
+        return jsonResponse({ error: "bad json" }, 400);
+      }
+    }
+
+    const favoriteMatch = url.pathname.match(/^\/favorites\/([^/]+)$/);
+    if (favoriteMatch && request.method === "DELETE") {
+      if (!auth.ok) return unauthorized();
+      const id = decodeURIComponent(favoriteMatch[1]);
+      const favorites = await readFavorites(env);
+      const index = favorites.findIndex((item) => String(item.id) === id);
+      if (index < 0) return jsonResponse({ error: "favorite not found" }, 404);
+
+      favorites.splice(index, 1);
+      await writeFavorites(env, favorites);
+      return new Response(null, { status: 204, headers: CORS });
     }
 
     if ((url.pathname === "/" || url.pathname === "") && request.method === "GET") {

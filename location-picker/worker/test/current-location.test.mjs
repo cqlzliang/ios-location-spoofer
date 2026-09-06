@@ -75,3 +75,10 @@ test("Worker source opens the map at a close default zoom", () => {
   const page = pages[0][1];
   assert.match(page, /map\.setView\(dispPos\(\),18\)/);
 });
+
+test("Worker source keeps Nominatim search and changes only the language", () => {
+  const page = pages[0][1];
+  assert.match(page, /var language=datum==="gcj"\?"zh-CN,zh":"en"/);
+  assert.match(page, /nominatim\.openstreetmap\.org\/search\?format=json&addressdetails=0&accept-language=/);
+  assert.doesNotMatch(page, /\/geocode\?src=amap|AMAP_KEY/);
+});

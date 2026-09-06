@@ -464,7 +464,8 @@ function showCurrentLocation(){
 
 function search(){
   var q=$("q").value.trim(); if(!q) return;
-  fetch("https://nominatim.openstreetmap.org/search?format=json&addressdetails=0&limit=8&q="+encodeURIComponent(q))
+  var language=datum==="gcj"?"zh-CN,zh":"en";
+  fetch("https://nominatim.openstreetmap.org/search?format=json&addressdetails=0&accept-language="+encodeURIComponent(language)+"&limit=8&q="+encodeURIComponent(q))
     .then(function(r){return r.json();})
     .then(function(a){
       var box=$("results"); box.innerHTML="";
